@@ -15,7 +15,7 @@ from repd.constants import (
     UNSUCCESSFUL_DEVELOPMENT_TYPES,
 )
 
-_DEFAULT_SRC = Path(__file__).parent.parent / "data" / "REPD_Publication_Q4_2025.csv"
+_DEFAULT_SRC = Path(__file__).parent.parent / "data" / "REPD_Publication_Q2_2026.csv"
 
 
 class REPDProcessor:
@@ -33,7 +33,10 @@ class REPDProcessor:
 
     def load(self) -> pd.DataFrame:
         """Read the raw REPD CSV into a DataFrame."""
-        return pd.read_csv(self.src, encoding=self.encoding)
+        df = pd.read_csv(self.src, encoding=self.encoding)
+        if df.columns.str.contains("Planning Permission  Granted").any():
+            df = df.rename(columns={"Planning Permission  Granted": "Planning Permission Granted"}) # For some reason, latest version sometimes adds an extra space.
+        return df
 
     # ── Transforms ───────────────────────────────────────────────────────────
 

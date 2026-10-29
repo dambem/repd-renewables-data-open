@@ -393,6 +393,58 @@ def plot_yearly_status_stacked(
     return fig
 
 
+def plot_stacked_bars(
+    data: pd.DataFrame,
+    title: str,
+    ylabel: str,
+    figsize: tuple[int, int] = (16, 8),
+    credit: str = "",
+    colors: dict[str, tuple[float, float, float]] | None = None,
+) -> Figure:
+    """One stacked bar chart, e.g. applications or MW per year by technology.
+
+    Args:
+        data: Index = x categories (e.g. years), columns = stack series
+            (e.g. technologies). Column order sets stack order (first column
+            at the bottom) and legend order.
+        title: Panel title.
+        ylabel: Y-axis label.
+        figsize: Figure size in inches.
+        credit: Optional attribution string.
+        colors: Optional colour per column; pass the same dict to several
+            charts so a technology keeps its colour across them. Missing
+            columns get an HSV wheel colour.
+
+    Returns:
+        Matplotlib Figure.
+    """
+    x = np.arange(len(data.index))
+    n = len(data.columns)
+    colors = {c: (colors or {}).get(c, mcolors.hsv_to_rgb((i / n, 0.85, 0.92))) for i, c in enumerate(data.columns)}
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor=_BG)
+    _style_ax(ax)
+    base = np.zeros(len(x))
+    for col in data.columns:
+        vals = data[col].to_numpy(dtype=float)
+        ax.bar(x, vals, bottom=base, color=colors[col], label=col, alpha=0.88, edgecolor=_BG, linewidth=0.4)
+        base += vals
+    ax.set_ylabel(ylabel, color=_MUTED, fontsize=11)
+    ax.set_title(title, color=_TEXT, fontsize=15, fontweight="bold", pad=10, loc="left")
+    ax.grid(axis="y", color="#ffffff", alpha=0.05, linewidth=0.5)
+    for spine in ("right", "top"):
+        ax.spines[spine].set_visible(False)
+    ax.legend(loc="upper left", fontsize=10, framealpha=0.4,
+              facecolor="#1d1810", edgecolor=_EDGE_DARK, labelcolor=_LABEL)
+    ax.set_xticks(x, [str(i) for i in data.index], color=_LABEL, fontsize=10, rotation=45, ha="right")
+
+    if credit:
+        fig.text(0.99, 0.01, credit, ha="right", va="bottom", fontsize=7, color="#54483e", alpha=0.7)
+
+    plt.tight_layout()
+    return fig
+
+
 def plot_choropleth(
     df: pd.DataFrame,
     lauth_path: str | Path,
@@ -471,6 +523,283 @@ def plot_choropleth(
     if credit:
         fig.text(0.99, 0.01, credit, ha="right", va="bottom",
                  fontsize=7, color="#555577", alpha=0.7)
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_time_sankey(
+    stats: pd.DataFrame,
+    title: str,
+    node_colors: dict[str, str],
+    order: list[str] | None = None,
+    legend: dict[str, str] | None = None,
+    xlabel: str = "Months since application submitted (cumulative mean)",
+    figsize: tuple[int, int] = (18, 9),
+    credit: str = "",
+) -> Figure:
+    """Sankey whose x-axis is time: link length = mean months spent on that step.
+
+    Each node sits at the cumulative mean months from the root, so the
+    horizontal distance between two stages is the average time taken. Links
+    are labelled with mean ± SD and median months; thin links into a leaf put
+    the label beside the leaf instead.
+
+    Args:
+        stats: One row per link with a ``(from, to)`` MultiIndex and columns
+            ``projects``, ``mean``, ``sd``, ``median`` (months). Optional bool
+            column ``open`` marks links timed to the window end (projects still
+            waiting). Links must form a tree (each node has one parent).
+        title: Plot title.
+        node_colors: Colour for every node name.
+        order: Node names in top-to-bottom order among siblings.
+        legend: Optional ``{label: colour}`` legend entries.
+        xlabel: X-axis label.
+        figsize: Figure size in inches.
+        credit: Optional attribution string.
+
+    Returns:
+        Matplotlib Figure.
+    """
+    links = stats.reset_index()
+    links.columns = ["from", "to", *links.columns[2:]]
+    assert links["to"].is_unique, "links must form a tree"
+    row = links.set_index("to")
+    rank = {n: i for i, n in enumerate(order or [])}
+    children = {
+        p: sorted(g["to"], key=lambda n: rank.get(n, len(rank)))
+        for p, g in links.groupby("from", sort=False)
+    }
+    root = next(n for n in children if n not in row.index)
+    total = int(links.loc[links["from"] == root, "projects"].sum())
+
+    # X: cumulative mean months. Untimed links borrow the longest sibling step.
+    x = {root: 0.0}
+    stack = [root]
+    while stack:
+        p = stack.pop()
+        kids = children.get(p, [])
+        fallback = row.loc[kids, "mean"].max()
+        for c in kids:
+            step = row.at[c, "mean"]
+            x[c] = x[p] + (step if pd.notna(step) else fallback if pd.notna(fallback) else 1.0)
+            stack.append(c)
+    xmax = max(x.values())
+
+    # Y: leaves stacked top-down with gaps; parents centred over their children.
+    # shortcut: tiny leaves get a minimum drawn height, so ribbon widths are not exact for n < ~0.6% of the cohort.
+    min_h, gap = total * 0.006, total * 0.025
+
+    def size(n: str) -> float:
+        return sum(size(c) for c in children[n]) if n in children else max(row.at[n, "projects"], min_h)
+
+    band: dict[str, tuple[float, float]] = {}
+    cursor = [0.0]
+
+    def place(n: str) -> tuple[float, float]:
+        if n not in children:
+            band[n] = (cursor[0], cursor[0] - size(n))
+            cursor[0] -= size(n) + gap
+            return band[n]
+        spans = [place(c) for c in children[n]]
+        mid = (spans[0][0] + spans[-1][1]) / 2
+        band[n] = (mid + size(n) / 2, mid - size(n) / 2)
+        return band[n]
+
+    place(root)
+
+    def fmt(r: pd.Series) -> str:
+        if pd.isna(r["mean"]):
+            return "not timed"
+        prefix = "waiting " if r.get("open", False) else ""
+        return f"{prefix}{r['mean']:.1f} ± {r['sd']:.1f} mo, median {r['median']:.1f}"
+
+    timing = {n: fmt(r) for n, r in row.iterrows()}
+    thin = total * 0.08  # ribbons narrower than this can't hold a label inside
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor=_BG)
+    _style_ax(ax)
+    w = xmax * 0.008
+    t = np.linspace(0, 1, 60)
+    s = t * t * (3 - 2 * t)
+    halo = [pe.withStroke(linewidth=3, foreground=_BG)]
+
+    for p, kids in children.items():
+        src_top = band[p][0]
+        for c in kids:
+            h = size(c)
+            a_top, a_bot = src_top, src_top - h
+            b_top, b_bot = band[c]
+            src_top -= h
+            x0, x1 = x[p] + w / 2, x[c] - w / 2
+            xs = x0 + (x1 - x0) * t
+            ax.fill_between(xs, a_bot + (b_bot - a_bot) * s, a_top + (b_top - a_top) * s,
+                            color=node_colors[c], alpha=0.4, linewidth=0, zorder=1)
+
+            text = timing[c]
+            if h >= thin:
+                ax.text((x0 + x1) / 2, (a_top + a_bot + b_top + b_bot) / 4, text,
+                        ha="center", va="center", fontsize=8.5, color=_TEXT,
+                        path_effects=halo, zorder=4)
+            elif c in children:  # thin ribbon into a mid stage: label above it
+                ax.text((x0 + x1) / 2, (a_top + b_top) / 2 + gap * 0.1, text,
+                        ha="center", va="bottom", fontsize=8.5, color=_TEXT,
+                        path_effects=halo, zorder=4)
+            # thin ribbons into leaves carry their timing on the leaf label instead
+
+    for n, (top, bot) in band.items():
+        ax.add_patch(mpatches.Rectangle((x[n] - w / 2, bot), w, top - bot,
+                                        color=node_colors[n], linewidth=0, zorder=2))
+        count = total if n == root else int(row.at[n, "projects"])
+        label = f"{n}\n{count:,}"
+        if n == root:
+            ax.text(x[n] - w, (top + bot) / 2, label, ha="right", va="center",
+                    fontsize=10, color=_TEXT, fontweight="bold", zorder=4)
+        elif n in children:
+            ax.text(x[n], top + gap * 0.15, label, ha="center", va="bottom",
+                    fontsize=10, color=_TEXT, fontweight="bold", path_effects=halo, zorder=4)
+        else:
+            label = f"{n}  {count:,}"
+            if row.at[n, "projects"] < thin:
+                label += f"\n{timing[n]}"
+            ax.text(x[n] + w, (top + bot) / 2, label, ha="left", va="center",
+                    fontsize=9, color=_LABEL, path_effects=halo, zorder=4)
+
+    ax.set_xlim(-xmax * 0.1, xmax * 1.22)
+    ax.set_ylim(cursor[0] + gap * 0.5, gap * 1.2)
+    ax.set_yticks([])
+    ax.set_xlabel(xlabel, color=_MUTED, fontsize=10)
+    ax.grid(axis="x", color="#ffffff", alpha=0.06, linewidth=0.5)
+    for spine in ("left", "right", "top"):
+        ax.spines[spine].set_visible(False)
+    ax.set_title(title, fontsize=15, fontweight="bold", color=_TEXT, pad=14, loc="left")
+
+    if legend:
+        handles = [mpatches.Patch(color=c, label=l) for l, c in legend.items()]
+        ax.legend(handles=handles, loc="lower right", fontsize=9, framealpha=0.4,
+                  facecolor="#1d1810", edgecolor=_EDGE_DARK, labelcolor=_LABEL)
+
+    if credit:
+        fig.text(0.99, 0.01, credit, ha="right", va="bottom",
+                 fontsize=7, color="#54483e", alpha=0.7)
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_alluvial(
+    states: pd.DataFrame,
+    order: list[str],
+    colors: dict[str, str],
+    title: str,
+    origin: pd.Timestamp | None = None,
+    figsize: tuple[int, int] = (18, 9),
+    credit: str = "",
+    label_first: bool = False,
+) -> Figure:
+    """Alluvial timeline: stacked state columns per snapshot, ribbons between.
+
+    Args:
+        states: One row per project, one column per snapshot date (ascending),
+            values are state names, or NaN where the project does not exist yet.
+            New arrivals fan in from the top of the previous column.
+        order: State names, top to bottom.
+        colors: Colour for every state.
+        title: Plot title.
+        origin: Date the first arrivals fan in from (defaults to one snapshot
+            spacing before the first column).
+        figsize: Figure size in inches.
+        credit: Optional attribution string.
+        label_first: Also label the first column's states on its left (for two-column before/after charts).
+
+    Returns:
+        Matplotlib Figure.
+    """
+    import matplotlib.dates as mdates
+
+    dates = list(states.columns)
+    xs = mdates.date2num(dates)
+    x_origin = mdates.date2num(origin) if origin is not None else xs[0] - (xs[1] - xs[0])
+    rank = {s: i for i, s in enumerate(order)}
+    gap = states.notna().sum().max() * 0.03
+    w = (xs[-1] - x_origin) * 0.006
+
+    def layout(col: pd.Series) -> dict[str, tuple[float, float]]:
+        """Top/bottom y for each present state, stacked top-down from 0."""
+        counts = col.value_counts()
+        out, y = {}, 0.0
+        for s in order:
+            if counts.get(s, 0):
+                out[s] = (y, y - counts[s])
+                y -= counts[s] + gap
+        return out
+
+    bands = [layout(states[d]) for d in dates]
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor=_BG)
+    _style_ax(ax)
+    t = np.linspace(0, 1, 50)
+    s_curve = t * t * (3 - 2 * t)
+
+    for j, d in enumerate(dates):
+        prev = states[dates[j - 1]] if j else pd.Series(np.nan, index=states.index)
+        pairs = pd.DataFrame({"a": prev, "b": states[d]}).dropna(subset=["b"])
+        flows = pairs.fillna({"a": "__new"}).value_counts(["a", "b"])
+        a_rank = lambda a: -1 if a == "__new" else rank[a]
+        # Source ends ordered by target, target ends by source: fewest crossings.
+        dst_cursor = {b: bands[j][b][0] for b in bands[j]}
+        x0 = xs[j - 1] + w / 2 if j else x_origin
+        x1 = xs[j] - w / 2
+        src_cursor = {a: bands[j - 1][a][0] for a in bands[j - 1]} if j else {}
+        seg_src = {}
+        for (a, b), n in sorted(flows.items(), key=lambda kv: (a_rank(kv[0][0]), rank[kv[0][1]])):
+            if a == "__new":
+                seg_src[(a, b)] = (gap * 0.6, gap * 0.6)
+            else:
+                seg_src[(a, b)] = (src_cursor[a], src_cursor[a] - n)
+                src_cursor[a] -= n
+        for (a, b), n in sorted(flows.items(), key=lambda kv: (rank[kv[0][1]], a_rank(kv[0][0]))):
+            a_top, a_bot = seg_src[(a, b)]
+            b_top = dst_cursor[b]
+            b_bot = b_top - n
+            dst_cursor[b] = b_bot
+            xx = x0 + (x1 - x0) * t
+            ax.fill_between(xx, a_bot + (b_bot - a_bot) * s_curve, a_top + (b_top - a_top) * s_curve,
+                            color=colors[b], alpha=0.45 if a == b else 0.75, linewidth=0, zorder=1)
+
+        for s, (top, bot) in bands[j].items():
+            ax.add_patch(mpatches.Rectangle((xs[j] - w / 2, bot), w, top - bot,
+                                            color=colors[s], linewidth=0, zorder=2))
+        new = int(prev.isna().sum() - states[d].isna().sum())
+        header = f"{states[d].notna().sum():,}" if label_first else f"{states[d].notna().sum():,}\n+{new:,} new"
+        ax.text(xs[j], gap * 0.9, header, ha="center", va="bottom", fontsize=8.5, color=_LABEL, zorder=4)
+
+    halo = [pe.withStroke(linewidth=3, foreground=_BG)]
+    last = states[dates[-1]].value_counts()
+    for s, (top, bot) in bands[-1].items():
+        ax.text(xs[-1] + w, (top + bot) / 2, f"{s}  {last[s]:,}", ha="left", va="center",
+                fontsize=9.5, color=_TEXT, path_effects=halo, zorder=4)
+
+    if label_first:
+        first = states[dates[0]].value_counts()
+        for s, (top, bot) in bands[0].items():
+            ax.text(xs[0] - w, (top + bot) / 2, f"{first[s]:,}  {s}", ha="right", va="center",
+                    fontsize=9.5, color=_TEXT, path_effects=halo, zorder=4)
+
+    lowest = min(bot for b in bands for _, bot in b.values())
+    left_pad = (xs[-1] - x_origin) * (0.17 if label_first else 0.0) + w * 2
+    ax.set_xlim(x_origin - left_pad, xs[-1] + (xs[-1] - x_origin) * 0.17)
+    ax.set_ylim(lowest - gap, gap * 4)
+    ax.set_xticks(xs, [f"{d:%d %b %Y}" for d in dates], fontsize=8.5, color=_MUTED)
+    ax.set_yticks([])
+    ax.grid(axis="x", color="#ffffff", alpha=0.05, linewidth=0.5)
+    for spine in ("left", "right", "top"):
+        ax.spines[spine].set_visible(False)
+    ax.set_title(title, fontsize=15, fontweight="bold", color=_TEXT, pad=14, loc="left")
+
+    if credit:
+        fig.text(0.99, 0.01, credit, ha="right", va="bottom",
+                 fontsize=7, color="#54483e", alpha=0.7)
 
     plt.tight_layout()
     return fig

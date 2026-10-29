@@ -28,7 +28,7 @@ Requires Python 3.11+.
 from datetime import datetime
 from repd.processor import REPDProcessor
 
-processor = REPDProcessor("REPD_Publication_Q4_2025.csv")
+processor = REPDProcessor("REPD_Publication_Q2_2026.csv")
 
 # Load, parse dates, convert OSGB36 → WGS84, return a GeoDataFrame
 gdf = processor.process_pipeline(date=datetime(2025, 1, 1))
@@ -57,7 +57,7 @@ See `examples/01_quickstart.ipynb` for a full walkthrough including maps and cha
 The CSV and GeoJSON boundary files are included in the `./data` folder in this repo (the REPD CSV is ~4.5 MB and updated quarterly). Place them anywhere and pass the path to `REPDProcessor`:
 
 ```python
-processor = REPDProcessor("path/to/REPD_Publication_Q4_2025.csv")
+processor = REPDProcessor("path/to/REPD_Publication_Q2_2026.csv")
 ```
 
 The `localauth.json` UK local authority boundary file is available from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/).
