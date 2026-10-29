@@ -4,7 +4,7 @@ Quick start::
 
     from repd.processor import REPDProcessor
 
-    processor = REPDProcessor("path/to/REPD_Publication_Q4_2025.csv")
+    processor = REPDProcessor("path/to/REPD_Publication_Q2_2026.csv")
     gdf = processor.process_pipeline(date=datetime(2025, 1, 1))
 """
 
